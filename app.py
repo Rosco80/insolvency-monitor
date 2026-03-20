@@ -78,25 +78,61 @@ def get_companies_by_sic(sic_code, api_key, max_results, progress_text):
     return companies[:max_results]
 
 
-def get_insolvency_status(company_number, api_key):
+def get_insolvency_status(company_number, api_key, months=24):
+    """
+    Returns (insolvency_type, case_date) for cases opened within `months`.
+    Deduplicates types and filters out old historical cases.
+    """
     url = f"{BASE_URL}/company/{company_number}/insolvency"
     resp = requests.get(url, auth=(api_key, ""))
 
     if resp.status_code == 404:
-        return "None"
+        return "None", ""
     if resp.status_code == 429:
         time.sleep(10)
-        return get_insolvency_status(company_number, api_key)
+        return get_insolvency_status(company_number, api_key, months)
     if resp.status_code != 200:
-        return f"Unknown ({resp.status_code})"
+        return f"Unknown ({resp.status_code})", ""
 
     data = resp.json()
     cases = data.get("cases", [])
     if not cases:
-        return "None"
+        return "None", ""
 
-    types = [c.get("type", "unknown") for c in cases]
-    return ", ".join(types)
+    from datetime import datetime, timedelta
+    cutoff = datetime.today() - timedelta(days=months * 30)
+
+    recent_types = []
+    latest_date = ""
+
+    for case in cases:
+        # Extract the earliest/most relevant date from the case
+        case_dates = case.get("dates", [])
+        case_date_str = ""
+        for d in case_dates:
+            if d.get("date"):
+                case_date_str = d["date"]
+                break
+
+        # Filter: only include if case date is within the window
+        if case_date_str:
+            try:
+                case_dt = datetime.strptime(case_date_str, "%Y-%m-%d")
+                if case_dt < cutoff:
+                    continue  # Too old — skip
+                if not latest_date or case_date_str > latest_date:
+                    latest_date = case_date_str
+            except ValueError:
+                pass
+
+        case_type = case.get("type", "unknown")
+        if case_type not in recent_types:
+            recent_types.append(case_type)
+
+    if not recent_types:
+        return "None", ""
+
+    return ", ".join(recent_types), latest_date
 
 
 def get_company_profile(company_number, api_key):
@@ -122,7 +158,7 @@ def get_last_filing_date(profile):
 
 def to_csv(records):
     output = io.StringIO()
-    fieldnames = ["Company Name", "Company Number", "SIC Code", "Company Status", "Insolvency Status", "Last Filing Date"]
+    fieldnames = ["Company Name", "Company Number", "SIC Code", "Company Status", "Insolvency Status", "Case Date", "Last Filing Date"]
     writer = csv.DictWriter(output, fieldnames=fieldnames)
     writer.writeheader()
     writer.writerows(records)
@@ -144,7 +180,7 @@ st.markdown("---")
 
 # ── Inputs ───────────────────────────────────────────────────────────────────
 
-col1, col2 = st.columns([2, 1])
+col1, col2, col3 = st.columns([2, 1, 1])
 
 with col1:
     sic_code = st.text_input(
@@ -155,6 +191,9 @@ with col1:
 
 with col2:
     max_results = st.slider("Companies to check", min_value=10, max_value=200, value=50, step=10)
+
+with col3:
+    months_filter = st.selectbox("Case opened within", [6, 12, 24, 36], index=1, format_func=lambda x: f"{x} months")
 
 run = st.button("▶ Run Monitor", type="primary", use_container_width=True)
 
@@ -187,7 +226,7 @@ if run:
         sic_codes = company.get("sic_codes", [sic_code])
         profile = get_company_profile(number, api_key)
         last_filing = get_last_filing_date(profile)
-        insolvency = get_insolvency_status(number, api_key)
+        insolvency, case_date = get_insolvency_status(number, api_key, months=months_filter)
 
         records.append({
             "Company Name": name,
@@ -195,6 +234,7 @@ if run:
             "SIC Code": sic_codes[0] if sic_codes else sic_code,
             "Company Status": status,
             "Insolvency Status": insolvency,
+            "Case Date": case_date,
             "Last Filing Date": last_filing,
         })
 
