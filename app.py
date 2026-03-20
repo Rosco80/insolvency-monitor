@@ -123,12 +123,15 @@ def get_companies_by_sic(sic_code, api_key, max_results, progress_text, offset=0
     active_collected = 0
     while active_collected < max_results and pages < MAX_PAGES:
         items, hits = _fetch_companies_page(sic_code, api_key, start_index,
-                                            company_status="active", page_size=100)
+                                            company_status="active",
+                                            page_size=min(max_results, 100))
         if total is None:
             total = hits
         if not items:
             break
         for c in items:
+            if active_collected >= max_results:
+                break
             num = c.get("company_number", "")
             if num not in seen and c.get("company_status", "") not in EXCLUDE_STATUSES:
                 companies.append(c)
@@ -323,7 +326,8 @@ with col1:
     )
 
 with col2:
-    max_results = st.slider("Companies to check", min_value=10, max_value=100, value=50, step=10)
+    max_results = st.slider("Active companies to check", min_value=10, max_value=100, value=50, step=10,
+                            help="How many active companies to scan for early warning signals. In-process companies (liquidation, administration etc.) are always scanned separately.")
 
 with col3:
     months_filter = st.selectbox("Case opened within", [6, 12, 24, 36], index=1, format_func=lambda x: f"{x} months")
