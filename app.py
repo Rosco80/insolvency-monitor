@@ -108,8 +108,9 @@ def get_companies_by_sic(sic_code, api_key, max_results, progress_text, offset=0
             if start_index >= total:
                 break
 
-    progress_text.info(f"Found **{len(companies)}** companies to check for SIC {sic_code} (from offset {offset})...")
-    return companies[:max_results]
+    result = companies[:max_results]
+    progress_text.info(f"Found **{len(result)}** companies to check for SIC {sic_code} (from offset {offset})...")
+    return result
 
 
 def _extract_case_start_date(case):
