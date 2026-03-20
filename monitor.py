@@ -25,6 +25,16 @@ load_dotenv()
 BASE_URL = "https://api.company-information.service.gov.uk"
 OUTPUT_DIR = "output"
 
+START_DATE_TYPES = {
+    "petitioned-on", "administration-started-on", "instrumented-on",
+    "voluntary-arrangement-started-on", "moratorium-started-on",
+}
+END_DATE_TYPES = {
+    "wound-up-on", "administration-ended-on", "concluded-winding-up-on",
+    "case-end-on", "due-to-be-dissolved-on", "administration-discharged-on",
+    "declaration-solvent-on",
+}
+
 
 def load_config():
     api_key = os.getenv("CH_API_KEY", "").strip()
@@ -78,12 +88,36 @@ def get_companies_by_sic(sic_code, api_key, max_results=100):
     return companies[:max_results]
 
 
-def get_insolvency_status(company_number, api_key):
+def _extract_case_start_date(case):
+    """3-pass date extraction: start-type dates → any date → practitioner appointed_on."""
+    case_dates = case.get("dates", [])
+    for d in case_dates:
+        if d.get("type") in START_DATE_TYPES and d.get("date"):
+            return d["date"]
+    for d in case_dates:
+        if d.get("date"):
+            return d["date"]
+    practitioners = case.get("practitioners", [])
+    active = [p["appointed_on"] for p in practitioners if p.get("appointed_on") and not p.get("ceased_to_act_on")]
+    return min(active) if active else ""
+
+
+def _is_case_closed(case):
+    """Returns True if case appears concluded (only end dates + all practitioners ceased)."""
+    case_dates = case.get("dates", [])
+    has_end = any(d.get("type") in END_DATE_TYPES for d in case_dates if d.get("type"))
+    has_start = any(d.get("type") in START_DATE_TYPES for d in case_dates if d.get("type"))
+    practitioners = case.get("practitioners", [])
+    all_ceased = practitioners and all(p.get("ceased_to_act_on") for p in practitioners)
+    return has_end and not has_start and all_ceased
+
+
+def get_insolvency_status(company_number, api_key, months=24):
     """
-    Check insolvency status for a single company.
-    Returns a string describing case type(s), or 'None' if clean.
-    404 = no insolvency record (treat as clean, not an error).
+    Returns insolvency type string for cases opened within `months`, or 'None'.
+    Uses 3-pass date extraction. Undatable or old cases are excluded.
     """
+    from datetime import datetime, timedelta
     url = f"{BASE_URL}/company/{company_number}/insolvency"
     resp = requests.get(url, auth=(api_key, ""))
 
@@ -92,7 +126,7 @@ def get_insolvency_status(company_number, api_key):
     if resp.status_code == 429:
         print("  Rate limit hit — waiting 10 seconds...")
         time.sleep(10)
-        return get_insolvency_status(company_number, api_key)
+        return get_insolvency_status(company_number, api_key, months)
     if resp.status_code != 200:
         return f"Unknown ({resp.status_code})"
 
@@ -101,8 +135,25 @@ def get_insolvency_status(company_number, api_key):
     if not cases:
         return "None"
 
-    types = [c.get("type", "unknown") for c in cases]
-    return ", ".join(types)
+    cutoff = datetime.today() - timedelta(days=months * 30)
+    recent_types = []
+
+    for case in cases:
+        if _is_case_closed(case):
+            continue
+        start_date_str = _extract_case_start_date(case)
+        if not start_date_str:
+            continue
+        try:
+            if datetime.strptime(start_date_str, "%Y-%m-%d") < cutoff:
+                continue
+        except ValueError:
+            continue
+        case_type = case.get("type", "unknown")
+        if case_type not in recent_types:
+            recent_types.append(case_type)
+
+    return ", ".join(recent_types) if recent_types else "None"
 
 
 def get_last_filing_date(company):

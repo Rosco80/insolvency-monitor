@@ -21,6 +21,17 @@ BASE_URL = "https://api.company-information.service.gov.uk"
 EXCLUDE_STATUSES = {"dissolved", "converted-closed", "removed", "closed"}
 # Currently in an active insolvency process
 ACTIVE_INSOLVENCY_STATUSES = {"liquidation", "administration", "receivership", "voluntary-arrangement", "insolvency-proceedings"}
+# Date types that indicate when a case STARTED (use for recency check)
+START_DATE_TYPES = {
+    "petitioned-on", "administration-started-on", "instrumented-on",
+    "voluntary-arrangement-started-on", "moratorium-started-on",
+}
+# Date types that indicate a case has ENDED (case is closed)
+END_DATE_TYPES = {
+    "wound-up-on", "administration-ended-on", "concluded-winding-up-on",
+    "case-end-on", "due-to-be-dissolved-on", "administration-discharged-on",
+    "declaration-solvent-on",
+}
 
 
 def load_api_key():
@@ -78,10 +89,58 @@ def get_companies_by_sic(sic_code, api_key, max_results, progress_text):
     return companies[:max_results]
 
 
+def _extract_case_start_date(case):
+    """
+    3-pass extraction of the best available start date for an insolvency case.
+    Pass 1: prefer start-type dates (petitioned-on, administration-started-on, etc.)
+    Pass 2: any date in the dates array
+    Pass 3: earliest active practitioner appointed_on (fallback for empty dates arrays)
+    Returns date string "YYYY-MM-DD" or "" if undatable.
+    """
+    case_dates = case.get("dates", [])
+
+    # Pass 1 — start-type dates only
+    for d in case_dates:
+        if d.get("type") in START_DATE_TYPES and d.get("date"):
+            return d["date"]
+
+    # Pass 2 — any date
+    for d in case_dates:
+        if d.get("date"):
+            return d["date"]
+
+    # Pass 3 — active practitioner appointed_on (handles receiver-manager empty dates)
+    practitioners = case.get("practitioners", [])
+    active_appointments = [
+        p["appointed_on"] for p in practitioners
+        if p.get("appointed_on") and not p.get("ceased_to_act_on")
+    ]
+    if active_appointments:
+        return min(active_appointments)
+
+    return ""
+
+
+def _is_case_closed(case):
+    """
+    Returns True if the case appears to be concluded:
+    - All dates in the dates array are end-type, AND
+    - All practitioners have ceased_to_act_on set.
+    """
+    case_dates = case.get("dates", [])
+    has_end_date = any(d.get("type") in END_DATE_TYPES for d in case_dates if d.get("type"))
+    has_start_date = any(d.get("type") in START_DATE_TYPES for d in case_dates if d.get("type"))
+    practitioners = case.get("practitioners", [])
+    all_practitioners_ceased = practitioners and all(p.get("ceased_to_act_on") for p in practitioners)
+
+    return has_end_date and not has_start_date and all_practitioners_ceased
+
+
 def get_insolvency_status(company_number, api_key, months=24):
     """
     Returns (insolvency_type, case_date) for cases opened within `months`.
-    Deduplicates types and filters out old historical cases.
+    Uses 3-pass date extraction and deduplicates types.
+    Undatable or old cases return ("None", "").
     """
     url = f"{BASE_URL}/company/{company_number}/insolvency"
     resp = requests.get(url, auth=(api_key, ""))
@@ -106,26 +165,28 @@ def get_insolvency_status(company_number, api_key, months=24):
     latest_date = ""
 
     for case in cases:
-        # Extract the first date from the case
-        case_dates = case.get("dates", [])
-        case_date_str = next((d["date"] for d in case_dates if d.get("date")), "")
-
-        # Skip if no date — can't verify when it started
-        if not case_date_str:
+        # Skip cases that appear concluded
+        if _is_case_closed(case):
             continue
 
-        # Skip if older than the filter window
+        start_date_str = _extract_case_start_date(case)
+
+        # Undatable — can't confirm recency, exclude
+        if not start_date_str:
+            continue
+
+        # Parse and check within window
         try:
-            case_dt = datetime.strptime(case_date_str, "%Y-%m-%d")
+            case_dt = datetime.strptime(start_date_str, "%Y-%m-%d")
         except ValueError:
             continue
 
         if case_dt < cutoff:
             continue
 
-        # Recent case — include it
-        if not latest_date or case_date_str > latest_date:
-            latest_date = case_date_str
+        # Recent confirmed case — include it
+        if not latest_date or start_date_str > latest_date:
+            latest_date = start_date_str
 
         case_type = case.get("type", "unknown")
         if case_type not in recent_types:
@@ -251,8 +312,9 @@ if run:
 
     # ── Results ───────────────────────────────────────────────────────────────
 
-    # Active signals only — dissolved companies already filtered at fetch time
-    in_process = [r for r in records if r["Company Status"] in ACTIVE_INSOLVENCY_STATUSES]
+    # Only show companies with a CONFIRMED recent insolvency case
+    # Companies with active status but no recent case confirmed are silently excluded
+    in_process = [r for r in records if r["Company Status"] in ACTIVE_INSOLVENCY_STATUSES and r["Insolvency Status"] != "None"]
     active_with_case = [r for r in records if r["Company Status"] == "active" and r["Insolvency Status"] != "None"]
     clean = [r for r in records if r["Insolvency Status"] == "None" and r["Company Status"] not in ACTIVE_INSOLVENCY_STATUSES]
 
@@ -275,7 +337,8 @@ if run:
         return ["background-color: #fff3cd"] * len(row)  # amber — active company, case filed
 
     import pandas as pd
-    df = pd.DataFrame(records)
+    actionable = in_process + active_with_case
+    df = pd.DataFrame(actionable) if actionable else pd.DataFrame(columns=["Company Name", "Company Number", "SIC Code", "Company Status", "Insolvency Status", "Case Date", "Last Filing Date"])
     st.dataframe(
         df.style.apply(highlight_insolvency, axis=1),
         use_container_width=True,
