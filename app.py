@@ -99,10 +99,25 @@ def get_insolvency_status(company_number, api_key):
     return ", ".join(types)
 
 
-def get_last_filing_date(company):
-    accounts = company.get("accounts", {})
-    last_accounts = accounts.get("last_accounts", {})
-    return last_accounts.get("made_up_to", "—")
+def get_company_profile(company_number, api_key):
+    """Fetch full company profile to get last filing date."""
+    url = f"{BASE_URL}/company/{company_number}"
+    resp = requests.get(url, auth=(api_key, ""))
+    if resp.status_code != 200:
+        return {}
+    return resp.json()
+
+
+def get_last_filing_date(profile):
+    """Return most recent filing date from accounts or confirmation statement."""
+    dates = []
+    accounts_date = profile.get("accounts", {}).get("last_accounts", {}).get("made_up_to", "")
+    confirmation_date = profile.get("confirmation_statement", {}).get("last_made_up_to", "")
+    if accounts_date:
+        dates.append(accounts_date)
+    if confirmation_date:
+        dates.append(confirmation_date)
+    return max(dates) if dates else "—"
 
 
 def to_csv(records):
@@ -170,7 +185,8 @@ if run:
         number = company.get("company_number", "N/A")
         status = company.get("company_status", "N/A")
         sic_codes = company.get("sic_codes", [sic_code])
-        last_filing = get_last_filing_date(company)
+        profile = get_company_profile(number, api_key)
+        last_filing = get_last_filing_date(profile)
         insolvency = get_insolvency_status(number, api_key)
 
         records.append({
