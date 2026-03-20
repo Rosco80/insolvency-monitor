@@ -76,30 +76,18 @@ def get_companies_by_sic(sic_code, api_key, max_results, progress_text, offset=0
     """
     companies = []
     seen = set()
-    MAX_PAGES = 20         # Safety cap
-    IN_PROCESS_PAGE = 500  # Pull up to 500 in-process per page — surfaces recent cases across full pool
+    MAX_PAGES = 10         # Safety cap
+    IN_PROCESS_CAP = 200   # Hard cap: date-logic fixes mean recent cases surface in first 200
 
-    # Pass 1 — in-process companies (always start from 0, large page size)
-    start_index = 0
-    pages = 0
-    total = None
-    while pages < MAX_PAGES:
-        items, hits = _fetch_companies_page(sic_code, api_key, start_index,
-                                            company_status=",".join(ACTIVE_INSOLVENCY_STATUSES),
-                                            page_size=IN_PROCESS_PAGE)
-        if total is None:
-            total = hits
-        if not items:
-            break
-        for c in items:
-            num = c.get("company_number", "")
-            if num not in seen and c.get("company_status", "") not in EXCLUDE_STATUSES:
-                companies.append(c)
-                seen.add(num)
-        start_index += len(items)
-        pages += 1
-        if not total or start_index >= total:
-            break
+    # Pass 1 — in-process companies (always start from 0, fetch in one API call)
+    items, hits = _fetch_companies_page(sic_code, api_key, 0,
+                                        company_status=",".join(ACTIVE_INSOLVENCY_STATUSES),
+                                        page_size=IN_PROCESS_CAP)
+    for c in items:
+        num = c.get("company_number", "")
+        if num not in seen and c.get("company_status", "") not in EXCLUDE_STATUSES:
+            companies.append(c)
+            seen.add(num)
 
     in_process_count = len(companies)
 
