@@ -17,6 +17,11 @@ load_dotenv()
 
 BASE_URL = "https://api.company-information.service.gov.uk"
 
+# Companies already wound up — no monitoring value
+EXCLUDE_STATUSES = {"dissolved", "converted-closed", "removed", "closed"}
+# Currently in an active insolvency process
+ACTIVE_INSOLVENCY_STATUSES = {"liquidation", "administration", "receivership", "voluntary-arrangement", "insolvency-proceedings"}
+
 
 def load_api_key():
     # Use Streamlit secrets in deployed environment, fall back to .env locally
@@ -62,7 +67,9 @@ def get_companies_by_sic(sic_code, api_key, max_results, progress_text):
         items = data.get("items", [])
         if not items:
             break
-        companies.extend(items)
+        # Filter out companies already wound up — no monitoring value
+        filtered = [c for c in items if c.get("company_status", "") not in EXCLUDE_STATUSES]
+        companies.extend(filtered)
         start_index += len(items)
 
         if start_index >= min(total, max_results, 1000):
@@ -186,21 +193,27 @@ if run:
 
     # ── Results ───────────────────────────────────────────────────────────────
 
-    distressed = [r for r in records if r["Insolvency Status"] != "None"]
-    clean = len(records) - len(distressed)
+    # Active signals only — dissolved companies already filtered at fetch time
+    in_process = [r for r in records if r["Company Status"] in ACTIVE_INSOLVENCY_STATUSES]
+    active_with_case = [r for r in records if r["Company Status"] == "active" and r["Insolvency Status"] != "None"]
+    clean = [r for r in records if r["Insolvency Status"] == "None" and r["Company Status"] not in ACTIVE_INSOLVENCY_STATUSES]
 
     st.markdown("---")
     st.subheader("Results")
+    st.caption(f"Dissolved and wound-up companies excluded. Showing active monitoring signals only.")
 
-    m1, m2, m3 = st.columns(3)
+    m1, m2, m3, m4 = st.columns(4)
     m1.metric("Companies Checked", len(records))
-    m2.metric("Insolvency Events", len(distressed), delta=None)
-    m3.metric("Clean", clean)
+    m2.metric("In Process", len(in_process), help="Currently in liquidation, administration or receivership")
+    m3.metric("Early Warning", len(active_with_case), help="Still active but insolvency case filed — act now")
+    m4.metric("Clean", len(clean))
 
-    # Colour-code insolvency status
+    # Colour-code by signal strength
     def highlight_insolvency(row):
+        if row["Company Status"] in ACTIVE_INSOLVENCY_STATUSES:
+            return ["background-color: #f8d7da"] * len(row)  # red — in process
         if row["Insolvency Status"] != "None":
-            return ["background-color: #fff3cd"] * len(row)
+            return ["background-color: #fff3cd"] * len(row)  # amber — early warning
         return [""] * len(row)
 
     import pandas as pd
@@ -222,8 +235,14 @@ if run:
         use_container_width=True
     )
 
-    if distressed:
+    if active_with_case:
         st.markdown("---")
-        st.subheader("⚠ Insolvency Events Detected")
-        for r in distressed:
+        st.subheader("🚨 Early Warning — Active Companies with Insolvency Filing")
+        for r in active_with_case:
             st.warning(f"**{r['Company Name']}** ({r['Company Number']}) — {r['Insolvency Status']}")
+
+    if in_process:
+        st.markdown("---")
+        st.subheader("⚠ Currently In Insolvency Process")
+        for r in in_process:
+            st.error(f"**{r['Company Name']}** ({r['Company Number']}) — {r['Company Status']} / {r['Insolvency Status']}")
