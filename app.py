@@ -64,53 +64,66 @@ def _fetch_companies_page(sic_code, api_key, start_index, company_status=None):
 def get_companies_by_sic(sic_code, api_key, max_results, progress_text, offset=0):
     """
     Fetch companies by SIC code using two targeted searches:
-    1. Active companies (early warning candidates)
-    2. Companies already in insolvency statuses (in-process candidates)
-    Paginate from `offset` until max_results non-excluded companies are collected.
+    Pass 1 — in-process companies: fetch ALL available (up to 200) regardless of max_results.
+             API doesn't sort by case date, so we must scan the full pool to find recent cases.
+    Pass 2 — active companies: fetch max_results (with offset for paging).
     API returns max 20 items per page regardless of items_per_page requested.
     """
     companies = []
     seen = set()
-    MAX_PAGES = 100  # Safety cap to prevent runaway loops
+    MAX_PAGES = 100        # Safety cap to prevent runaway loops
+    IN_PROCESS_CAP = 200   # Always scan up to 200 in-process companies to surface recent cases
 
-    # Pass 1 — in-process companies (always from index 0; pool is small, offset doesn't apply)
-    # Pass 2 — active companies (apply user offset for paging through larger pool)
-    search_passes = [
-        (",".join(ACTIVE_INSOLVENCY_STATUSES), "in-process companies", 0),
-        ("active", "active companies", offset),
-    ]
-
-    for status_filter, label, pass_offset in search_passes:
-        if len(companies) >= max_results:
+    # Pass 1 — in-process companies (always start from 0, uncapped by max_results)
+    start_index = 0
+    pages = 0
+    total = None
+    while pages < MAX_PAGES:
+        items, hits = _fetch_companies_page(sic_code, api_key, start_index,
+                                            company_status=",".join(ACTIVE_INSOLVENCY_STATUSES))
+        if total is None:
+            total = hits
+        if not items:
             break
-        start_index = pass_offset
-        pages = 0
-        total = None
+        for c in items:
+            num = c.get("company_number", "")
+            if num not in seen and c.get("company_status", "") not in EXCLUDE_STATUSES:
+                companies.append(c)
+                seen.add(num)
+        start_index += len(items)
+        pages += 1
+        if not total or start_index >= total or len(companies) >= IN_PROCESS_CAP:
+            break
 
-        while len(companies) < max_results and pages < MAX_PAGES:
-            items, hits = _fetch_companies_page(sic_code, api_key, start_index, company_status=status_filter)
+    in_process_count = len(companies)
 
-            if total is None:
-                total = hits
+    # Pass 2 — active companies (apply user offset for paging)
+    start_index = offset
+    pages = 0
+    total = None
+    active_collected = 0
+    while active_collected < max_results and pages < MAX_PAGES:
+        items, hits = _fetch_companies_page(sic_code, api_key, start_index, company_status="active")
+        if total is None:
+            total = hits
+        if not items:
+            break
+        for c in items:
+            num = c.get("company_number", "")
+            if num not in seen and c.get("company_status", "") not in EXCLUDE_STATUSES:
+                companies.append(c)
+                seen.add(num)
+                active_collected += 1
+        start_index += len(items)
+        pages += 1
+        if not total or start_index >= total:
+            break
 
-            if not items:
-                break
-
-            for c in items:
-                num = c.get("company_number", "")
-                if num not in seen and c.get("company_status", "") not in EXCLUDE_STATUSES:
-                    companies.append(c)
-                    seen.add(num)
-
-            start_index += len(items)
-            pages += 1
-
-            if start_index >= total:
-                break
-
-    result = companies[:max_results]
-    progress_text.info(f"Found **{len(result)}** companies to check for SIC {sic_code} (from offset {offset})...")
-    return result
+    progress_text.info(
+        f"Found **{len(companies)}** companies to check for SIC {sic_code} "
+        f"({in_process_count} in-process + {active_collected} active)..."
+    )
+    return companies
 
 
 def _extract_case_start_date(case):
