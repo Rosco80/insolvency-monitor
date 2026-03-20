@@ -49,13 +49,16 @@ def load_api_key():
     return key
 
 
-def _fetch_companies_page(sic_code, api_key, start_index, company_status=None, page_size=100):
+def _fetch_companies_page(sic_code, api_key, start_index, company_status=None,
+                          page_size=100, incorporated_from=None):
     """Fetch a single page of companies from the advanced search endpoint.
     CH advanced search uses 'size' (not 'items_per_page'), supports up to 5000.
     """
     params = {"sic_codes": sic_code, "size": page_size, "start_index": start_index}
     if company_status:
         params["company_status"] = company_status
+    if incorporated_from:
+        params["incorporated_from"] = incorporated_from
     resp = requests.get(f"{BASE_URL}/advanced-search/companies", auth=(api_key, ""), params=params)
     if resp.status_code == 401:
         st.error("Invalid API key. Check your CH_API_KEY in .env.")
@@ -69,20 +72,42 @@ def _fetch_companies_page(sic_code, api_key, start_index, company_status=None, p
 def get_companies_by_sic(sic_code, api_key, max_results, progress_text, offset=0):
     """
     Fetch companies by SIC code using two targeted searches:
-    Pass 1 — in-process companies: fetch ALL available using large page size (size=500).
-             CH advanced search uses 'size' param (up to 5000), not 'items_per_page'.
-             No sort-by-date available, so we must pull the full pool to surface recent cases.
+
+    Pass 1 — in-process companies (recently incorporated only):
+        The CH API has no sort-by-case-date. API returns oldest-registered companies first.
+        Strategy: filter to companies incorporated in last 7 years, then fetch the LAST 200
+        results. The tail of this set = most recently incorporated in-process companies =
+        most recent case dates (confirmed by live API testing: last 200 had 2025-2026 dates).
+        Cost: 2 API calls (count + fetch).
+
     Pass 2 — active companies: fetch max_results (with offset for paging).
     """
+    from datetime import datetime
+    from dateutil.relativedelta import relativedelta
+
     companies = []
     seen = set()
-    MAX_PAGES = 10         # Safety cap
-    IN_PROCESS_CAP = 200   # Hard cap: date-logic fixes mean recent cases surface in first 200
+    MAX_PAGES = 10
+    IN_PROCESS_CAP = 200
+    # Only look at companies incorporated in the last 7 years — cuts noise, keeps recent cases
+    incorporated_from = (datetime.today() - relativedelta(years=7)).strftime("%Y-%m-%d")
 
-    # Pass 1 — in-process companies (always start from 0, fetch in one API call)
-    items, hits = _fetch_companies_page(sic_code, api_key, 0,
-                                        company_status=",".join(ACTIVE_INSOLVENCY_STATUSES),
-                                        page_size=IN_PROCESS_CAP)
+    # Pass 1a — get total count (1 API call)
+    _, total_in_process = _fetch_companies_page(
+        sic_code, api_key, 0,
+        company_status=",".join(ACTIVE_INSOLVENCY_STATUSES),
+        incorporated_from=incorporated_from,
+        page_size=1
+    )
+
+    # Pass 1b — fetch last 200 (most recently incorporated = most recent case dates)
+    start_in_process = max(0, total_in_process - IN_PROCESS_CAP)
+    items, _ = _fetch_companies_page(
+        sic_code, api_key, start_in_process,
+        company_status=",".join(ACTIVE_INSOLVENCY_STATUSES),
+        incorporated_from=incorporated_from,
+        page_size=IN_PROCESS_CAP
+    )
     for c in items:
         num = c.get("company_number", "")
         if num not in seen and c.get("company_status", "") not in EXCLUDE_STATUSES:
