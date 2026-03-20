@@ -46,46 +46,69 @@ def load_api_key():
     return key
 
 
+def _fetch_companies_page(sic_code, api_key, start_index, company_status=None):
+    """Fetch a single page of companies from the advanced search endpoint."""
+    params = {"sic_codes": sic_code, "items_per_page": 20, "start_index": start_index}
+    if company_status:
+        params["company_status"] = company_status
+    resp = requests.get(f"{BASE_URL}/advanced-search/companies", auth=(api_key, ""), params=params)
+    if resp.status_code == 401:
+        st.error("Invalid API key. Check your CH_API_KEY in .env.")
+        st.stop()
+    if resp.status_code != 200:
+        return [], 0
+    data = resp.json()
+    return data.get("items", []), data.get("hits", 0)
+
+
 def get_companies_by_sic(sic_code, api_key, max_results, progress_text):
+    """
+    Fetch companies by SIC code using two targeted searches:
+    1. Active companies (early warning candidates)
+    2. Companies already in insolvency statuses (in-process candidates)
+    Paginate until max_results non-excluded companies are collected.
+    API returns max 20 items per page regardless of items_per_page requested.
+    """
     companies = []
-    start_index = 0
-    page_size = 100
-    total = None
+    seen = set()
+    MAX_PAGES = 100  # Safety cap to prevent runaway loops
 
-    while True:
-        url = f"{BASE_URL}/advanced-search/companies"
-        params = {
-            "sic_codes": sic_code,
-            "items_per_page": page_size,
-            "start_index": start_index,
-        }
-        resp = requests.get(url, auth=(api_key, ""), params=params)
+    # Pass 1 — active companies (early warning signals)
+    # Pass 2 — already in active insolvency statuses
+    search_passes = [
+        ("active", "active companies"),
+        (",".join(ACTIVE_INSOLVENCY_STATUSES), "in-process companies"),
+    ]
 
-        if resp.status_code == 401:
-            st.error("Invalid API key. Check your CH_API_KEY in .env.")
-            st.stop()
-        if resp.status_code != 200:
+    for status_filter, label in search_passes:
+        if len(companies) >= max_results:
             break
+        start_index = 0
+        pages = 0
+        total = None
 
-        data = resp.json()
+        while len(companies) < max_results and pages < MAX_PAGES:
+            items, hits = _fetch_companies_page(sic_code, api_key, start_index, company_status=status_filter)
 
-        if total is None:
-            total = data.get("hits", 0)
-            if total == 0:
-                return []
-            progress_text.info(f"Found **{total:,}** registered companies for SIC {sic_code}. Checking first {min(total, max_results)}...")
+            if total is None:
+                total = hits
 
-        items = data.get("items", [])
-        if not items:
-            break
-        # Filter out companies already wound up — no monitoring value
-        filtered = [c for c in items if c.get("company_status", "") not in EXCLUDE_STATUSES]
-        companies.extend(filtered)
-        start_index += len(items)
+            if not items:
+                break
 
-        if start_index >= min(total, max_results, 1000):
-            break
+            for c in items:
+                num = c.get("company_number", "")
+                if num not in seen and c.get("company_status", "") not in EXCLUDE_STATUSES:
+                    companies.append(c)
+                    seen.add(num)
 
+            start_index += len(items)
+            pages += 1
+
+            if start_index >= total:
+                break
+
+    progress_text.info(f"Found **{len(companies)}** companies to check for SIC {sic_code}...")
     return companies[:max_results]
 
 
@@ -93,7 +116,7 @@ def _extract_case_start_date(case):
     """
     3-pass extraction of the best available start date for an insolvency case.
     Pass 1: prefer start-type dates (petitioned-on, administration-started-on, etc.)
-    Pass 2: any date in the dates array
+    Pass 2: any non-end-type date (avoids using wound-up-on as a start date)
     Pass 3: earliest active practitioner appointed_on (fallback for empty dates arrays)
     Returns date string "YYYY-MM-DD" or "" if undatable.
     """
@@ -104,9 +127,9 @@ def _extract_case_start_date(case):
         if d.get("type") in START_DATE_TYPES and d.get("date"):
             return d["date"]
 
-    # Pass 2 — any date
+    # Pass 2 — any date that is NOT an end-type (prevents using wound-up-on as start)
     for d in case_dates:
-        if d.get("date"):
+        if d.get("date") and d.get("type") not in END_DATE_TYPES:
             return d["date"]
 
     # Pass 3 — active practitioner appointed_on (handles receiver-manager empty dates)
@@ -124,16 +147,17 @@ def _extract_case_start_date(case):
 def _is_case_closed(case):
     """
     Returns True if the case appears to be concluded:
-    - All dates in the dates array are end-type, AND
-    - All practitioners have ceased_to_act_on set.
+    - Has end-type dates but no start-type dates, AND
+    - No active practitioners (empty list OR all have ceased_to_act_on)
     """
     case_dates = case.get("dates", [])
     has_end_date = any(d.get("type") in END_DATE_TYPES for d in case_dates if d.get("type"))
     has_start_date = any(d.get("type") in START_DATE_TYPES for d in case_dates if d.get("type"))
     practitioners = case.get("practitioners", [])
-    all_practitioners_ceased = practitioners and all(p.get("ceased_to_act_on") for p in practitioners)
+    # Empty practitioners list = no active practitioners = case is concluded
+    no_active_practitioners = not practitioners or all(p.get("ceased_to_act_on") for p in practitioners)
 
-    return has_end_date and not has_start_date and all_practitioners_ceased
+    return has_end_date and not has_start_date and no_active_practitioners
 
 
 def get_insolvency_status(company_number, api_key, months=24):
@@ -148,8 +172,15 @@ def get_insolvency_status(company_number, api_key, months=24):
     if resp.status_code == 404:
         return "None", ""
     if resp.status_code == 429:
-        time.sleep(10)
-        return get_insolvency_status(company_number, api_key, months)
+        # Bounded retry — max 3 attempts with backoff, no infinite recursion
+        for attempt in range(3):
+            time.sleep(10 * (attempt + 1))
+            retry = requests.get(url, auth=(api_key, ""))
+            if retry.status_code == 200:
+                resp = retry
+                break
+        else:
+            return "Rate limited", ""
     if resp.status_code != 200:
         return f"Unknown ({resp.status_code})", ""
 
@@ -158,8 +189,9 @@ def get_insolvency_status(company_number, api_key, months=24):
     if not cases:
         return "None", ""
 
-    from datetime import datetime, timedelta
-    cutoff = datetime.today() - timedelta(days=months * 30)
+    from datetime import datetime
+    from dateutil.relativedelta import relativedelta
+    cutoff = datetime.today() - relativedelta(months=months)
 
     recent_types = []
     latest_date = ""
@@ -253,7 +285,7 @@ with col1:
     )
 
 with col2:
-    max_results = st.slider("Companies to check", min_value=10, max_value=200, value=50, step=10)
+    max_results = st.slider("Companies to check", min_value=10, max_value=100, value=50, step=10)
 
 with col3:
     months_filter = st.selectbox("Case opened within", [6, 12, 24, 36], index=1, format_func=lambda x: f"{x} months")
