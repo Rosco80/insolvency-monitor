@@ -106,24 +106,26 @@ def get_insolvency_status(company_number, api_key, months=24):
     latest_date = ""
 
     for case in cases:
-        # Extract the earliest/most relevant date from the case
+        # Extract the first date from the case
         case_dates = case.get("dates", [])
-        case_date_str = ""
-        for d in case_dates:
-            if d.get("date"):
-                case_date_str = d["date"]
-                break
+        case_date_str = next((d["date"] for d in case_dates if d.get("date")), "")
 
-        # Filter: only include if case date is within the window
-        if case_date_str:
-            try:
-                case_dt = datetime.strptime(case_date_str, "%Y-%m-%d")
-                if case_dt < cutoff:
-                    continue  # Too old — skip
-                if not latest_date or case_date_str > latest_date:
-                    latest_date = case_date_str
-            except ValueError:
-                pass
+        # Skip if no date — can't verify when it started
+        if not case_date_str:
+            continue
+
+        # Skip if older than the filter window
+        try:
+            case_dt = datetime.strptime(case_date_str, "%Y-%m-%d")
+        except ValueError:
+            continue
+
+        if case_dt < cutoff:
+            continue
+
+        # Recent case — include it
+        if not latest_date or case_date_str > latest_date:
+            latest_date = case_date_str
 
         case_type = case.get("type", "unknown")
         if case_type not in recent_types:
@@ -264,13 +266,13 @@ if run:
     m3.metric("Early Warning", len(active_with_case), help="Still active but insolvency case filed — act now")
     m4.metric("Clean", len(clean))
 
-    # Colour-code by signal strength
+    # Colour-code by signal strength — only if there's a recent insolvency signal
     def highlight_insolvency(row):
+        if row["Insolvency Status"] == "None":
+            return [""] * len(row)
         if row["Company Status"] in ACTIVE_INSOLVENCY_STATUSES:
             return ["background-color: #f8d7da"] * len(row)  # red — in process
-        if row["Insolvency Status"] != "None":
-            return ["background-color: #fff3cd"] * len(row)  # amber — early warning
-        return [""] * len(row)
+        return ["background-color: #fff3cd"] * len(row)  # amber — active company, case filed
 
     import pandas as pd
     df = pd.DataFrame(records)
