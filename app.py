@@ -132,11 +132,13 @@ def get_companies_by_sic(sic_code, api_key, max_results, progress_text, offset=0
 
 def _extract_case_start_date(case):
     """
-    3-pass extraction of the best available start date for an insolvency case.
+    4-pass extraction of the best available date for an insolvency case.
     Pass 1: prefer start-type dates (petitioned-on, administration-started-on, etc.)
-    Pass 2: any non-end-type date (avoids using wound-up-on as a start date)
-    Pass 3: earliest active practitioner appointed_on (fallback for empty dates arrays)
-    Returns date string "YYYY-MM-DD" or "" if undatable.
+    Pass 2: any non-end-type date
+    Pass 3: earliest active practitioner appointed_on
+    Pass 4: any date at all — last resort for CH bulk cases that only have wound-up-on.
+            Post-2024 CH API increasingly omits start dates for compulsory liquidations.
+    Returns date string "YYYY-MM-DD" or "" if truly undatable.
     """
     case_dates = case.get("dates", [])
 
@@ -145,12 +147,12 @@ def _extract_case_start_date(case):
         if d.get("type") in START_DATE_TYPES and d.get("date"):
             return d["date"]
 
-    # Pass 2 — any date that is NOT an end-type (prevents using wound-up-on as start)
+    # Pass 2 — any date that is NOT an end-type
     for d in case_dates:
         if d.get("date") and d.get("type") not in END_DATE_TYPES:
             return d["date"]
 
-    # Pass 3 — active practitioner appointed_on (handles receiver-manager empty dates)
+    # Pass 3 — active practitioner appointed_on
     practitioners = case.get("practitioners", [])
     active_appointments = [
         p["appointed_on"] for p in practitioners
@@ -159,23 +161,25 @@ def _extract_case_start_date(case):
     if active_appointments:
         return min(active_appointments)
 
+    # Pass 4 — any date at all (e.g. wound-up-on for recent bulk-pipeline cases)
+    all_dates = [d["date"] for d in case_dates if d.get("date")]
+    if all_dates:
+        return min(all_dates)
+
     return ""
 
 
 def _is_case_closed(case):
     """
-    Returns True if the case appears to be concluded:
-    - Has end-type dates but no start-type dates, AND
-    - No active practitioners (empty list OR all have ceased_to_act_on)
+    Conservative closed-case check.
+    Only returns True if ALL practitioners have ceased — clear evidence the case concluded.
+    Empty practitioners list is NOT treated as closed: official receiver cases have no
+    practitioners recorded but are still active. Let the date window filter handle age.
     """
-    case_dates = case.get("dates", [])
-    has_end_date = any(d.get("type") in END_DATE_TYPES for d in case_dates if d.get("type"))
-    has_start_date = any(d.get("type") in START_DATE_TYPES for d in case_dates if d.get("type"))
     practitioners = case.get("practitioners", [])
-    # Empty practitioners list = no active practitioners = case is concluded
-    no_active_practitioners = not practitioners or all(p.get("ceased_to_act_on") for p in practitioners)
-
-    return has_end_date and not has_start_date and no_active_practitioners
+    if not practitioners:
+        return False  # No practitioner data — cannot confirm closure
+    return all(p.get("ceased_to_act_on") for p in practitioners)
 
 
 def get_insolvency_status(company_number, api_key, months=24):
