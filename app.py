@@ -60,8 +60,10 @@ def get_companies_by_sic(sic_code, api_key, max_results, progress_text):
             progress_text.info(f"Found **{total:,}** registered companies for SIC {sic_code}. Checking first {min(total, max_results)}...")
 
         items = data.get("items", [])
+        if not items:
+            break
         companies.extend(items)
-        start_index += page_size
+        start_index += len(items)
 
         if start_index >= min(total, max_results, 1000):
             break

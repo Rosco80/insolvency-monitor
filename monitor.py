@@ -67,9 +67,11 @@ def get_companies_by_sic(sic_code, api_key, max_results=100):
             print(f"  Found {total} companies. Fetching up to {min(total, max_results)}...")
 
         items = data.get("items", [])
+        if not items:
+            break
         companies.extend(items)
 
-        start_index += page_size
+        start_index += len(items)
         if start_index >= min(total, max_results, 1000):
             break
 
