@@ -46,9 +46,11 @@ def load_api_key():
     return key
 
 
-def _fetch_companies_page(sic_code, api_key, start_index, company_status=None):
-    """Fetch a single page of companies from the advanced search endpoint."""
-    params = {"sic_codes": sic_code, "items_per_page": 20, "start_index": start_index}
+def _fetch_companies_page(sic_code, api_key, start_index, company_status=None, page_size=100):
+    """Fetch a single page of companies from the advanced search endpoint.
+    CH advanced search uses 'size' (not 'items_per_page'), supports up to 5000.
+    """
+    params = {"sic_codes": sic_code, "size": page_size, "start_index": start_index}
     if company_status:
         params["company_status"] = company_status
     resp = requests.get(f"{BASE_URL}/advanced-search/companies", auth=(api_key, ""), params=params)
@@ -64,23 +66,24 @@ def _fetch_companies_page(sic_code, api_key, start_index, company_status=None):
 def get_companies_by_sic(sic_code, api_key, max_results, progress_text, offset=0):
     """
     Fetch companies by SIC code using two targeted searches:
-    Pass 1 — in-process companies: fetch ALL available (up to 200) regardless of max_results.
-             API doesn't sort by case date, so we must scan the full pool to find recent cases.
+    Pass 1 — in-process companies: fetch ALL available using large page size (size=500).
+             CH advanced search uses 'size' param (up to 5000), not 'items_per_page'.
+             No sort-by-date available, so we must pull the full pool to surface recent cases.
     Pass 2 — active companies: fetch max_results (with offset for paging).
-    API returns max 20 items per page regardless of items_per_page requested.
     """
     companies = []
     seen = set()
-    MAX_PAGES = 100        # Safety cap to prevent runaway loops
-    IN_PROCESS_CAP = 200   # Always scan up to 200 in-process companies to surface recent cases
+    MAX_PAGES = 20         # Safety cap
+    IN_PROCESS_PAGE = 500  # Pull up to 500 in-process per page — surfaces recent cases across full pool
 
-    # Pass 1 — in-process companies (always start from 0, uncapped by max_results)
+    # Pass 1 — in-process companies (always start from 0, large page size)
     start_index = 0
     pages = 0
     total = None
     while pages < MAX_PAGES:
         items, hits = _fetch_companies_page(sic_code, api_key, start_index,
-                                            company_status=",".join(ACTIVE_INSOLVENCY_STATUSES))
+                                            company_status=",".join(ACTIVE_INSOLVENCY_STATUSES),
+                                            page_size=IN_PROCESS_PAGE)
         if total is None:
             total = hits
         if not items:
@@ -92,7 +95,7 @@ def get_companies_by_sic(sic_code, api_key, max_results, progress_text, offset=0
                 seen.add(num)
         start_index += len(items)
         pages += 1
-        if not total or start_index >= total or len(companies) >= IN_PROCESS_CAP:
+        if not total or start_index >= total:
             break
 
     in_process_count = len(companies)
@@ -103,7 +106,8 @@ def get_companies_by_sic(sic_code, api_key, max_results, progress_text, offset=0
     total = None
     active_collected = 0
     while active_collected < max_results and pages < MAX_PAGES:
-        items, hits = _fetch_companies_page(sic_code, api_key, start_index, company_status="active")
+        items, hits = _fetch_companies_page(sic_code, api_key, start_index,
+                                            company_status="active", page_size=100)
         if total is None:
             total = hits
         if not items:
