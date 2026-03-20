@@ -73,17 +73,17 @@ def get_companies_by_sic(sic_code, api_key, max_results, progress_text, offset=0
     seen = set()
     MAX_PAGES = 100  # Safety cap to prevent runaway loops
 
-    # Pass 1 — active companies (early warning signals)
-    # Pass 2 — already in active insolvency statuses
+    # Pass 1 — in-process companies (always from index 0; pool is small, offset doesn't apply)
+    # Pass 2 — active companies (apply user offset for paging through larger pool)
     search_passes = [
-        ("active", "active companies"),
-        (",".join(ACTIVE_INSOLVENCY_STATUSES), "in-process companies"),
+        (",".join(ACTIVE_INSOLVENCY_STATUSES), "in-process companies", 0),
+        ("active", "active companies", offset),
     ]
 
-    for status_filter, label in search_passes:
+    for status_filter, label, pass_offset in search_passes:
         if len(companies) >= max_results:
             break
-        start_index = offset  # Apply user offset to each pass
+        start_index = pass_offset
         pages = 0
         total = None
 
