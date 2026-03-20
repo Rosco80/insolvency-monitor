@@ -22,15 +22,18 @@ EXCLUDE_STATUSES = {"dissolved", "converted-closed", "removed", "closed"}
 # Currently in an active insolvency process
 ACTIVE_INSOLVENCY_STATUSES = {"liquidation", "administration", "receivership", "voluntary-arrangement", "insolvency-proceedings"}
 # Date types that indicate when a case STARTED (use for recency check)
+# wound-up-on included: CH semantics = "Commencement of winding up" for voluntary liquidations
 START_DATE_TYPES = {
     "petitioned-on", "administration-started-on", "instrumented-on",
     "voluntary-arrangement-started-on", "moratorium-started-on",
+    "wound-up-on",
 }
 # Date types that indicate a case has ENDED (case is closed)
+# wound-up-on removed (it's a start event per CH API constants.yml)
 END_DATE_TYPES = {
-    "wound-up-on", "administration-ended-on", "concluded-winding-up-on",
+    "administration-ended-on", "concluded-winding-up-on",
     "case-end-on", "due-to-be-dissolved-on", "administration-discharged-on",
-    "declaration-solvent-on",
+    "declaration-solvent-on", "moratorium-ended-on", "voluntary-arrangement-ended-on",
 }
 
 
