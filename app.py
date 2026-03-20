@@ -61,12 +61,12 @@ def _fetch_companies_page(sic_code, api_key, start_index, company_status=None):
     return data.get("items", []), data.get("hits", 0)
 
 
-def get_companies_by_sic(sic_code, api_key, max_results, progress_text):
+def get_companies_by_sic(sic_code, api_key, max_results, progress_text, offset=0):
     """
     Fetch companies by SIC code using two targeted searches:
     1. Active companies (early warning candidates)
     2. Companies already in insolvency statuses (in-process candidates)
-    Paginate until max_results non-excluded companies are collected.
+    Paginate from `offset` until max_results non-excluded companies are collected.
     API returns max 20 items per page regardless of items_per_page requested.
     """
     companies = []
@@ -83,7 +83,7 @@ def get_companies_by_sic(sic_code, api_key, max_results, progress_text):
     for status_filter, label in search_passes:
         if len(companies) >= max_results:
             break
-        start_index = 0
+        start_index = offset  # Apply user offset to each pass
         pages = 0
         total = None
 
@@ -108,7 +108,7 @@ def get_companies_by_sic(sic_code, api_key, max_results, progress_text):
             if start_index >= total:
                 break
 
-    progress_text.info(f"Found **{len(companies)}** companies to check for SIC {sic_code}...")
+    progress_text.info(f"Found **{len(companies)}** companies to check for SIC {sic_code} (from offset {offset})...")
     return companies[:max_results]
 
 
@@ -275,7 +275,7 @@ st.markdown("---")
 
 # ── Inputs ───────────────────────────────────────────────────────────────────
 
-col1, col2, col3 = st.columns([2, 1, 1])
+col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
 
 with col1:
     sic_code = st.text_input(
@@ -289,6 +289,15 @@ with col2:
 
 with col3:
     months_filter = st.selectbox("Case opened within", [6, 12, 24, 36], index=1, format_func=lambda x: f"{x} months")
+
+with col4:
+    start_offset = st.number_input(
+        "Start from",
+        min_value=0,
+        value=0,
+        step=50,
+        help="Skip the first N companies. Use to page through batches — e.g. 0, 50, 100..."
+    )
 
 run = st.button("▶ Run Monitor", type="primary", use_container_width=True)
 
@@ -305,7 +314,7 @@ if run:
     progress_bar = st.progress(0)
 
     progress_text.info(f"Searching Companies House for SIC code **{sic_code}**...")
-    companies = get_companies_by_sic(sic_code, api_key, max_results, progress_text)
+    companies = get_companies_by_sic(sic_code, api_key, max_results, progress_text, offset=int(start_offset))
 
     if not companies:
         st.warning(f"No companies found for SIC code {sic_code}.")
